@@ -1,0 +1,18 @@
+[project]
+name = "eco-loop"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "eppy>=0.5.69",
+    "fastapi>=0.140.0",
+    "httpx>=0.28.1",
+    "numpy>=2.4.6",
+    "pandas>=3.0.5",
+    "plotly>=6.9.0",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "streamlit>=1.60.0",
+    "uvicorn>=0.51.0",
+]
