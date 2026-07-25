@@ -67,24 +67,31 @@ st.markdown(
     div.block-container {
         padding-top: 2rem !important;
         padding-bottom: 2rem !important;
+        padding-left: 3rem !important;
+        padding-right: 3rem !important;
+        max-width: 100% !important;
+    }
+    
+    div[data-testid="stHorizontalBlock"] {
+        gap: 24px !important;
     }
 
     /* Titles & Refined Headers */
     .dashboard-title {
-        font-size: 2.1rem;
-        font-weight: 800;
-        color: #020617;
-        letter-spacing: -0.8px;
-        margin-bottom: 4px;
+        font-size: 32px !important;
+        font-weight: 700 !important;
+        color: #0F172A !important;
+        letter-spacing: -0.02em !important;
+        margin-bottom: 0px;
         line-height: 1.1;
     }
 
     .dashboard-subtitle {
-        color: #64748B;
-        font-size: 0.95rem;
-        font-weight: 400;
-        letter-spacing: 0.2px;
-        margin-top: 0px;
+        color: #475569 !important;
+        font-size: 14px !important;
+        font-weight: 400 !important;
+        letter-spacing: 0.1px;
+        margin-top: 6px !important;
         margin-bottom: 24px;
         border-bottom: 1px solid #E2E8F0;
         padding-bottom: 12px;
@@ -114,7 +121,7 @@ st.markdown(
     /* KPI Grid Styling */
     .kpi-container {
         display: flex;
-        gap: 16px;
+        gap: 24px !important;
         margin-bottom: 24px;
         width: 100%;
     }
@@ -139,7 +146,7 @@ st.markdown(
 
     .kpi-value {
         font-size: 2.1rem;
-        font-weight: 800;
+        font-weight: 800 !important;
         color: #020617;
         line-height: 1.1;
     }
@@ -157,9 +164,10 @@ st.markdown(
     }
 
     .kpi-subtext {
-        font-size: 0.8rem;
-        color: #64748B;
-        margin-top: 4px;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        color: #334155 !important;
+        margin-top: 12px !important;
     }
 
     /* Refined Log Feed */
@@ -506,7 +514,7 @@ steps_completed = len(logs)
 col_head_title, col_head_meta = st.columns([3, 1])
 
 with col_head_title:
-    st.markdown('<div class="dashboard-title">ecoloop control panel</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dashboard-title">EcoLoop Control Panel</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="dashboard-subtitle">Smart building closed-loop energy optimization // Source: {data_mode}</div>', unsafe_allow_html=True)
 
 with col_head_meta:
@@ -587,8 +595,8 @@ with col_charts:
         margin=dict(l=10, r=10, t=10, b=10),
         height=220,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color="#020617", size=10)),
-        xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=10))),
-        yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Load (kWh)", font=dict(color="#64748B", size=10)))
+        xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=11), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=11))),
+        yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=11), title=dict(text="Load (kWh)", standoff=20, font=dict(color="#64748B", size=11)))
     )
     st.plotly_chart(fig_energy, width="stretch", config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
@@ -639,8 +647,8 @@ with col_charts:
         margin=dict(l=10, r=10, t=10, b=10),
         height=220,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color="#020617", size=10)),
-        xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=10))),
-        yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Temperature (°C)", font=dict(color="#64748B", size=10)), range=[14, 33])
+        xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=11), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=11))),
+        yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=11), title=dict(text="Temperature (°C)", standoff=20, font=dict(color="#64748B", size=11)), range=[14, 33])
     )
     st.plotly_chart(fig_temp, width="stretch", config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
