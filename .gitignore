@@ -1,0 +1,33 @@
+# Secrets / local env
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# EnergyPlus bulky outputs (keep .gitkeep)
+data/baseline_results/*
+!data/baseline_results/.gitkeep
+data/agent_results/*
+!data/agent_results/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+
+# EnergyPlus models and weather files
+energyplus/models/*.idf
+energyplus/weather/*.epw
+*.idf
+*.epw
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+
+# Streamlit
+.streamlit/secrets.toml

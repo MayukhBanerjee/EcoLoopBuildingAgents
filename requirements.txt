@@ -1,0 +1,25 @@
+# EcoLoop — Honeywell Campus Hackathon
+# Python 3.10+
+
+# EnergyPlus bridge
+eppy==0.5.63
+
+# LLM
+openai>=1.0.0
+
+# API layer
+fastapi==0.111.0
+uvicorn==0.29.0
+
+# Dashboard
+streamlit==1.35.0
+plotly==5.22.0
+
+# Data
+pandas==2.2.0
+numpy==1.26.0
+
+# Config / validation
+python-dotenv==1.0.0
+httpx==0.27.0
+pydantic==2.7.0
