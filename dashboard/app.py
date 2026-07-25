@@ -511,7 +511,7 @@ with col_head_title:
 
 with col_head_meta:
     # Sleek ghost button with thin border & refresh icon
-    st.button("⟳ Synchronize state", key="sync_button", use_container_width=True)
+    st.button("⟳ Synchronize state", key="sync_button", width="stretch")
 
 # --- CALCULATIONS ---
 baseline_total_kwh = df["baseline_kwh_cum"].iloc[-1]
@@ -590,7 +590,7 @@ with col_charts:
         xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=10))),
         yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Load (kWh)", font=dict(color="#64748B", size=10)))
     )
-    st.plotly_chart(fig_energy, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig_energy, width="stretch", config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
 
     # 2. Zone Temperature & Setpoint Modulation
@@ -642,7 +642,7 @@ with col_charts:
         xaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Timestep (15-min)", font=dict(color="#64748B", size=10))),
         yaxis=dict(gridcolor="#E2E8F0", tickfont=dict(color="#64748B", size=10), title=dict(text="Temperature (°C)", font=dict(color="#64748B", size=10)), range=[14, 33])
     )
-    st.plotly_chart(fig_temp, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig_temp, width="stretch", config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col_terminal:
