@@ -58,11 +58,17 @@ eplusssz.*
 epluszsz.*
 sqlite.err
 
-# EnergyPlus models and weather files (local install / large binaries)
-energyplus/models/*.idf
-energyplus/weather/*.epw
+# Ad-hoc EnergyPlus dumps anywhere else (keep out of git)
 *.idf
 *.epw
+
+# Hackathon deliverable: baseline + instrumented runtime models + weather
+# (negations must come after the *.idf / *.epw rules above)
+!energyplus/
+!energyplus/models/
+!energyplus/models/*.idf
+!energyplus/weather/
+!energyplus/weather/*.epw
 
 # OS / IDE
 .DS_Store
