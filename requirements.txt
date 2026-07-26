@@ -1,26 +1,29 @@
 # EcoLoop — Honeywell Campus Hackathon
-# Python 3.10+
+# Python 3.10+ (64-bit required for EnergyPlus DLL)
 
-# EnergyPlus bridge
-eppy==0.5.63
+# NOTE: Do NOT add energyplus-api from PyPI.
+# The real API ships inside ENERGYPLUS_DIR as pyenergyplus.
+# Import via: sys.path.insert(0, ENERGYPLUS_DIR)
 
-# LLM — openai SDK pointed at Groq's OpenAI-compatible endpoint
-# (open-source models: llama-3.3-70b-versatile / llama-3.1-8b-instant)
+# IDF helpers (optional; Phase 1 may edit IDF by hand if eppy IDD mismatches)
+eppy>=0.5.63
+
+# LLM — openai SDK pointed at Groq (or Ollama)
 openai>=1.0.0
 
 # API layer
-fastapi==0.111.0
-uvicorn==0.29.0
+fastapi>=0.111.0
+uvicorn>=0.29.0
 
 # Dashboard
-streamlit==1.35.0
-plotly==5.22.0
+streamlit>=1.35.0
+plotly>=5.22.0
 
 # Data
-pandas==2.2.0
-numpy==1.26.0
+pandas>=2.2.0
+numpy>=1.26.0
 
 # Config / validation
-python-dotenv==1.0.0
-httpx==0.27.0
-pydantic==2.7.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
+pydantic>=2.7.0

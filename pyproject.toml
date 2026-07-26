@@ -1,0 +1,22 @@
+[project]
+name = "eco-loop"
+version = "0.1.0"
+description = "EcoLoop — closed-loop EnergyPlus + LLM building agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "eppy>=0.5.63",
+    "fastapi>=0.111.0",
+    "httpx>=0.27.0",
+    "numpy>=1.26.0",
+    "openai>=1.0.0",
+    "pandas>=2.2.0",
+    "plotly>=5.22.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "streamlit>=1.35.0",
+    "uvicorn>=0.29.0",
+]
+
+[tool.uv]
+package = false
