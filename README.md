@@ -196,7 +196,8 @@ uv run pytest tests/ -q
 
 ## Docs
 
-- [`docs/architecture.md`](docs/architecture.md) — layers, tools, clamps, latency, observability
+- [`docs/architecture.md`](docs/architecture.md) — layers, tools, clamps, stream bus, savings
+- [`docs/prompt_playbook.md`](docs/prompt_playbook.md) — ACT-FIRST prompts, playbook A–E, latency
 
 ---
 

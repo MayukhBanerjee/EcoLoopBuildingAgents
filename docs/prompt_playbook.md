@@ -1,150 +1,190 @@
 # EcoLoop Prompt Engineering Playbook
 
-How we get reliable control decisions out of an open-source model
-(`llama-3.3-70b-versatile` / `llama-3.1-8b-instant` on Groq). This document is
-referenced by the System Architecture deliverable — the brief explicitly asks
-for prompt engineering strategy, prompt latency management, and handling of
-lengthy simulation logs.
+How we get reliable control decisions out of open-source Llama models on Groq
+(`llama-3.1-8b-instant` for `--dev`, `llama-3.3-70b-versatile` for scored runs).
 
-## 1. Principles (why open-source models need different prompting)
+This document matches the **current** code in `agent/prompts.py`,
+`agent/llm_client.py`, `agent/orchestrator.py`, and `agent/memory.py`.
+It is the detailed companion to §4–§5 of [`architecture.md`](architecture.md).
 
-Open 8B–70B models are weaker than frontier models at: staying in output
-format over many turns, remembering constraints stated once, and resisting
-"helpful" violations (e.g. overcooling a hot zone past the safe limit). Every
-rule below exists to compensate for one of those failure modes.
+---
 
-1. **The prompt is advisory; code is law.** Constraints appear in the prompt so
-   the model *plans* within them, but every constraint is re-enforced in
-   `ep_writer.py`. Never rely on the prompt for safety.
-2. **Determinism over creativity.** `temperature=0.2`, `max_tokens=600`.
-   A control loop wants the same decision for the same state.
-3. **Structure in, structure out.** Sensor state goes in as compact JSON
-   (rounded to 1 decimal). Output shape is enforced:
-   `REASONING / ACTIONS(tool calls) / EXPECTED`.
-4. **Token budget is a hard resource.** Groq free tier = 100K tokens/day on
-   70B. Target ≤ 700 prompt + ≤ 400 completion tokens per timestep.
+## 1. Principles
 
-## 2. System prompt — structure that works on Llama-class models
+Open 8B–70B models are weaker than frontier models at: staying on format for
+many turns, remembering constraints stated once, and resisting “helpful”
+violations (e.g. overcooling past the safe limit). Every rule below exists
+to compensate for one of those failure modes.
 
-Order matters: identity → mission → hard constraints → decision procedure →
-one worked example → output format. Put constraints BEFORE the procedure
-(Llama models weight early tokens more for rule-following).
+1. **The prompt is advisory; code is law.** Constraints are listed in
+   `SYSTEM_PROMPT`, but `bridge/clamps.py` re-enforces INV-1…5 on every write.
+2. **Determinism over creativity.** `temperature=0.2`, `max_tokens=600`
+   (`agent/llm_client.py`). A control loop wants the same decision for the
+   same state.
+3. **Act first, narrate second.** Sensor data is pre-injected. The model’s
+   first response must contain **control tool calls**. Prose is optional
+   (`REASONING` / `EXPECTED_OUTCOME`); empty content with valid tools is OK.
+4. **Token budget is a hard resource.** Groq free tier ≈ 100K tokens/day on
+   70B (500K on 8B). Prefer cadence (`AGENT_EVERY_N_STEPS=4`) over longer
+   prompts when budget is tight.
 
-```text
-You are EcoLoop, the autonomous energy-management agent for a 5-zone
-commercial building simulated in EnergyPlus.
+---
 
-MISSION (in priority order):
-1. Never violate a HARD CONSTRAINT.
-2. Keep occupied zones comfortable: PMV within [-0.5, +0.5].
-3. Minimize total facility kWh vs the uncontrolled baseline.
-4. Prefer shedding load when grid carbon intensity is HIGH or demand is
-   near the peak threshold.
+## 2. System prompt — what the code actually sends
 
-HARD CONSTRAINTS (violations are rejected and you must re-issue):
-- Zones are exactly: SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1.
-- Cooling setpoint: 20.0-26.0 C occupied; up to 28.0 C only if occupancy=0.
-- Heating setpoint: 18.0-24.0 C occupied; down to 16.0 C only if occupancy=0.
-- Change no setpoint by more than 2.0 C in one timestep.
-- Lighting level 0.0-1.0; minimum 0.3 in any zone with occupancy > 0.
+Source of truth: `SYSTEM_PROMPT` in `agent/prompts.py`. Order in the live
+prompt:
 
-EACH TIMESTEP:
-1. Read the sensor snapshot below. Identify: unoccupied zones still
-   conditioned, occupied zones outside comfort, grid/peak status.
-2. If proposing a setpoint change larger than 1.0 C in an occupied zone,
-   call predict_comfort first.
-3. Issue tool calls. If you have nothing beneficial to change, issue none
-   and say why.
-
-EXAMPLE OF A GOOD DECISION:
-Snapshot: SPACE2-1 is 21.4 C with 0 occupants; SPACE3-1 is 25.9 C with 8
-occupants; grid intensity HIGH.
-Good actions: set_hvac_setpoint(SPACE2-1, cooling=23.4, heating=18.0)
-[+2 C ramp toward relaxed], set_lighting_level(SPACE2-1, 0.0),
-predict_comfort(SPACE3-1, 24.0) then set_hvac_setpoint(SPACE3-1,
-cooling=24.0, heating=20.0).
-
-OUTPUT FORMAT (always, exactly):
-REASONING: 2-3 sentences on what the state shows.
-ACTIONS: your tool calls (or "none").
-EXPECTED: 1 sentence on what should change next timestep.
-```
-
-Why each piece earns its tokens:
-- **Priority-ordered mission** resolves the energy-vs-comfort tie the way we
-  want, every time, instead of letting the model pick per-call.
-- **Exact zone list** kills the most common hallucination (`ZONE_1`).
-- **One worked example** (few-shot n=1) is the single highest-leverage trick
-  for small models — it anchors both format and policy. Two examples were
-  tested to add tokens without improving compliance.
-- **"Issue none and say why"** gives the model a legal no-op, which prevents
-  invented actions when the building is already optimal.
-
-## 3. Timestep prompt — lean, structured, stateful
-
-```text
-TIMESTEP 34/96 | sim time 08:30 | outdoor 29.3 C
-GRID: carbon intensity HIGH (evening ramp in 9h) | demand 41.2 kW /
-peak threshold 55.0 kW (OK)
-ENERGY: agent 118.4 kWh cumulative vs baseline 131.0 kWh (-9.6%)
-
-MEMORY (your last 3 decisions):
-T31: relaxed SPACE2-1 (unoccupied), cut its lights to 0
-T32: cooled SPACE3-1 to 24.0 after predict_comfort OK
-T33: no change (stable)
-
-SENSORS:
-{"SPACE1-1": {"temp": 23.1, "occ": 11, "cool_sp": 23.5, "heat_sp": 20.0},
- "SPACE2-1": {"temp": 24.8, "occ": 0,  "cool_sp": 25.4, "heat_sp": 18.0}, ...}
-
-Decide your actions for this timestep.
-```
-
-Rules:
-- **Round everything to 1 decimal.** `24.183333` wastes tokens and invites the
-  model to echo noise back.
-- **Memory as 3 one-line summaries**, not raw transcripts. This is the anti-
-  oscillation mechanism: the model can see "I already relaxed SPACE2-1."
-- **Deltas, not dumps** — never paste EnergyPlus logs or CSVs into a prompt.
-  The bridge reduces the whole simulation state to ~15 numbers. (This is the
-  answer to the brief's "handling lengthy simulation logs" question: logs go
-  to JSONL on disk for audit; the LLM only ever sees the structured snapshot.)
-- Include **current setpoints** so a 2 °C ramp is computable by the model, not
-  guessed.
-
-## 4. Self-correction loop (Criterion 4 evidence)
-
-On any invalid tool call, one corrective turn is sent back as the tool result:
-
-```text
-REJECTED: cooling_setpoint 17.0 is below the occupied minimum 20.0 for
-SPACE3-1 (occupancy=8). Valid range now: 22.0-26.0 (2.0 C ramp limit from
-current 24.0). Re-issue this action within constraints.
-```
-
-Rejection message anatomy — each element measurably improves the retry:
-state the violated rule, state the *currently* legal range (after ramp
-math — don't make the model redo it), and give an imperative instruction.
-One retry max; then the writer clamps and the log records the failure.
-
-## 5. Latency and budget management (brief-mandated topic)
-
-- Groq serves Llama 3.3 70B at ~275 tokens/s → a full decision round is
-  ~1–2 s. 96 steps ≈ 3–5 min wall-clock for a 24-h simulated day.
-- 2 s minimum spacing between calls (30 req/min limit), `retry-after` honored
-  on 429.
-- Per-call token accounting in the JSONL; a run prints its total so you know
-  what's left of the 100K/day budget before starting another 70B run.
-- Cadence knob `AGENT_EVERY_N_STEPS` degrades gracefully to 30-min decisions
-  if budget or latency demands it.
-
-## 6. Anti-patterns (tried or foreseeable — do not do these)
-
-| Anti-pattern | Failure it causes |
+| Block | Purpose |
 |---|---|
-| Restating constraints only in the timestep prompt | Model drifts after ~20 turns; keep them in the system prompt, which is resent every call anyway (stateless API) |
+| Identity + mission | Minimise kWh; PMV in [-0.5, +0.5] occupied; CO2 below 1000 ppm; respect peak |
+| Exact zone list | `SPACE1-1` … `SPACE5-1` — kills `ZONE_1` hallucinations |
+| **CRITICAL RULE — YOU MUST ACT** | Do **not** call `read_sensors`; data is already in the user message |
+| Control playbook A–E | Mechanical defaults per occupancy / PMV / grid |
+| Tools | Primary writes vs optional reads; `read_sensors` marked **avoid** |
+| Hard constraints 1–5 | Mirror INV-1…5 so the model *plans* inside the envelope |
+| Output format | `REASONING:` + `EXPECTED_OUTCOME:` (actions = tool calls, not prose) |
+
+### Playbook (embedded in system prompt)
+
+| Rule | When | Default action |
+|---|---|---|
+| A | `occ = 0` | cool 28 °C, heat 16 °C, lights 0.0 |
+| B | occupied, PMV in band | cool 25 °C, heat 20 °C |
+| C | occupied, PMV > +0.5 | cool 24 °C, heat 20 °C |
+| D | occupied, PMV < -0.5 | cool 26 °C, heat 21 °C |
+| E | grid HIGH + demand approaching/exceeded | prefer A-style setbacks; dim occupied lights to 0.5 |
+
+Why this beats a free-form “think carefully” prompt: 8B models follow
+**numbered / lettered procedures** more reliably than abstract goals.
+
+There is **no few-shot narrative example** in the current system prompt —
+token cost was redirected into the per-timestep **REQUIRED ACTIONS** block
+(below), which is higher leverage for “issue these tools now.”
+
+---
+
+## 3. Timestep (user) prompt
+
+Built by `build_timestep_prompt()` every LLM cadence step:
+
+```text
+=== TIMESTEP {n} | HH:MM ===
+
+## Current building state (LIVE SENSOR DATA — do not call read_sensors)
+{compact JSON from SensorReading.to_compact()}
+
+## Grid context
+  Carbon intensity : … gCO2/kWh  [HIGH|LOW]
+  Demand status    : OK | APPROACHING | EXCEEDED
+  Threshold        : PEAK_DEMAND_THRESHOLD_KW
+
+## Agent memory
+{AgentMemory.render() — last 3 decisions}
+
+## REQUIRED ACTIONS THIS TIMESTEP (issue these tool calls NOW)
+  - SPACE2-1: UNOCCUPIED -> set_hvac_setpoint(cooling 28.0, heating 16.0)
+               + set_lighting_level(0.0)
+  - SPACE3-1: OCCUPIED (temp 25.2 C) -> set_hvac_setpoint per comfort playbook
+
+Issue the set_hvac_setpoint / set_lighting_level tool calls listed above,
+adjusting values with your judgement (playbook rules A–E). Then give your
+REASONING and EXPECTED_OUTCOME as text.
+```
+
+### Design rules (enforced in code)
+
+- **Round to 1 decimal** in `to_compact()` — fewer tokens, less echo noise.
+- **Inject sensors** — the #1 historical failure mode was “call `read_sensors`
+  then stop.” Pre-loading removes that dead-end.
+- **REQUIRED ACTIONS** — explicit per-zone checklist; the model still may
+  adjust numbers, but it cannot claim it “didn’t know what to call.”
+- **Memory = 3 one-line summaries** with last setpoints — anti-oscillation,
+  not a transcript dump.
+- **Never paste** EnergyPlus `.eso` / CSV / `.err` into the prompt. Logs stay
+  on disk for audit; the LLM only sees the structured snapshot.
+
+---
+
+## 4. Action nudge (self-correction for “observed, never acted”)
+
+If after the tool-call loop the pending `ControlAction` is still empty,
+`orchestrator` appends `build_action_nudge_prompt()` and does **one** more
+LLM round:
+
+```text
+Timestep N: your previous response contained NO control tool calls.
+That is a protocol violation …
+  set_hvac_setpoint(zone="SPACE1-1", …) and set_lighting_level(…)
+  …
+Respond ONLY with tool calls. No text.
+```
+
+If that still fails → `policy_action(reading)` (adaptive occupancy setbacks)
+and the log is tagged `[NUDGE-MISS]` / `[AUTO]`.
+
+Separately, `llm_client` may:
+
+1. Reject invalid tool args with a precise range (including ramp-aware bounds)
+   and allow **one** corrective call.
+2. **Salvage** JSON tool calls from freeform text when the model skips the
+   function-calling channel.
+
+---
+
+## 5. Latency and budget management
+
+| Lever | Default | Effect |
+|---|---|---|
+| `TIMEOUT_S` | 15 s | Then retry once; then `LLMUnavailable` → policy |
+| `AGENT_CALL_SPACING_S` | 2.0 s | Stay under Groq ~30 req/min |
+| `AGENT_EVERY_N_STEPS` | often 4 in scored/demo runs | ~4× fewer LLM calls; holds re-apply last action |
+| `AGENT_MAX_TOOL_ROUNDS` | env-tunable | Caps multi-tool chatter per step |
+| Model | 8B vs 70B | Dev vs scored; same prompts |
+
+A full 96-step day with `N=4` is on the order of ~24 LLM decisions, not 96 —
+critical for free-tier demos and for wall-clock video recording.
+
+Held steps log `reasoning: "[HOLD] Between LLM cadence steps — holding last
+setpoints."` and `held: true`. The dashboard hides HOLD rows so judges see
+decision steps, not cadence filler.
+
+---
+
+## 6. Empty reasoning is not a failure
+
+Small models frequently return **tool_calls with `content=null`**. That still
+counts as a successful control step: actions are applied and logged.
+
+Do **not** display empty reasoning as “Holding previous settings” — that
+label is reserved for `held=true` cadence steps. The UI maps empty prose to an
+honest “tool calls, no separate text rationale” caption
+(`dashboard/components/agent_log.py`).
+
+---
+
+## 7. Anti-patterns (do not regress to these)
+
+| Anti-pattern | Failure |
+|---|---|
+| Forcing a `read_sensors` first turn | 8B stops after the read; building stays on schedule |
 | `temperature` ≥ 0.7 | Oscillating setpoints, format breaks |
-| Asking for JSON output *and* tool calls | 8B models pick one at random; use tool calls only, prose for REASONING |
-| Pasting the CSV/err log "for context" | Blows the token budget; model quotes the log instead of deciding |
-| Threatening/roleplay pressure ("you will be shut down") | No measurable compliance gain, wastes tokens |
-| Letting the model compute the ramp math | Off-by-one violations; give it the pre-computed legal range in rejections |
+| Asking for JSON **and** tool calls as dual sources of truth | Model picks one at random; tools = actions, text = rationale only |
+| Pasting CSV / `.err` “for context” | Token blow-up; model quotes the log |
+| Restating constraints only in the user message | Drift after many turns; keep them in `SYSTEM_PROMPT` |
+| Trusting the prompt for safety | Always clamp in `EPWriter` |
+| Few-shot examples that contradict playbook A–E | Confuses small models; prefer REQUIRED ACTIONS |
+| Inventing “issue none” as the happy path | Current contract is **must act**; policy covers true no-ops after nudge miss |
+
+---
+
+## 8. Where to edit
+
+| Change | File |
+|---|---|
+| Mission, playbook, constraints, output labels | `agent/prompts.py` → `SYSTEM_PROMPT` |
+| Per-step layout / REQUIRED ACTIONS | `agent/prompts.py` → `build_timestep_prompt` |
+| Nudge wording | `agent/prompts.py` → `build_action_nudge_prompt` |
+| Temp / tokens / timeout / spacing | `agent/llm_client.py` |
+| Memory window | `agent/memory.py` (`window=3`) |
+| Offline / chaos behaviour | `agent/policy.py` |
