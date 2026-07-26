@@ -8,12 +8,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# EnergyPlus bulky outputs (keep .gitkeep)
-data/baseline_results/*
-!data/baseline_results/.gitkeep
-data/agent_results/*
-!data/agent_results/.gitkeep
-data/runtime_oracle/*
+# EnergyPlus bulky outputs (ignore all data/ subdirs except baseline_results, agent_results, and logs)
+data/*
+!data/baseline_results/
+!data/baseline_results/*
+!data/agent_results/
+!data/runtime_oracle/*
 !data/runtime_oracle/.gitkeep
 data/bridge_smoke/*
 !data/bridge_smoke/.gitkeep
@@ -23,8 +23,9 @@ data/bridge_write/*
 !data/bridge_write/.gitkeep
 data/bridge_meter_diag/*
 data/bridge_meter_diag2/*
-data/logs/*
-!data/logs/.gitkeep
+data/agent_results/*
+!data/logs/
+!data/logs/*
 
 # EnergyPlus temporary and diagnostic files
 *.audit
