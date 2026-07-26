@@ -1,5 +1,7 @@
 # EcoLoop
 
+Video Rundown - https://drive.google.com/file/d/19tUI7NE-kAEafsSUTyqKI0Xly9cp5DNy/view?usp=sharing
+
 **Autonomous closed-loop building energy management** — a physics-accurate EnergyPlus simulation controlled in real time by an open-source LLM, with a hard safety layer between the model and the building.
 
 Built for the Honeywell Campus Hackathon (Physical AI).
@@ -196,11 +198,6 @@ uv run pytest tests/ -q
 
 ## Docs
 
-- [`docs/architecture.md`](docs/architecture.md) — layers, tools, clamps, stream bus, savings
-- [`docs/prompt_playbook.md`](docs/prompt_playbook.md) — ACT-FIRST prompts, playbook A–E, latency
+- [`docs/architecture.md`](docs/architecture.md) — layers, tools, clamps, latency, observability
 
 ---
-
-## License / hackathon note
-
-PoC for Honeywell Campus Hackathon. Simulation-only — no live building control.
