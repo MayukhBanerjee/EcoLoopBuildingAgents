@@ -1,0 +1,77 @@
+@startuml EcoLoop_MCP_Tools
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam defaultFontName IBM Plex Sans
+
+title EcoLoop — MCP tool registry & tools\n(one MCP-compatible server module → five tools → LLM tool-calling)
+
+package "MCP-compatible server layer" as MCP #EEF2FF {
+  component "agent/mcp_server.py\n«MCP tool registry»\nMCP_TOOLS + Pydantic schemas" as REG
+
+  package "Write tools (primary)" as W #ECFDF5 {
+    usecase "set_hvac_setpoint\ncooling + heating °C\nper zone" as T1
+    usecase "set_lighting_level\nlights 0.0–1.0\nper zone" as T2
+  }
+
+  package "Read / reason tools (optional)" as R #FEF3C7 {
+    usecase "read_sensors\nzone temp, occ, CO2,\nsetpoints, outdoor, energy" as T3
+    usecase "get_energy_report\nkWh, demand, savings\nvs baseline" as T4
+    usecase "predict_comfort\nPMV for proposed\ncooling setpoint" as T5
+  }
+}
+
+package "Runtime" as RT #F8FAFC {
+  component "agent/tools.py\nToolExecutor" as EXEC
+  component "agent/llm_client.py\nmcp_to_openai_tool()" as CONV
+  component "agent/orchestrator.py" as ORCH
+  component "LLM (Groq Llama)" as LLM
+}
+
+package "Building I/O" as IO #ECFDF5 {
+  component "EPReader" as READ
+  component "EPWriter + clamps" as WRITE
+  component "comfort.pmv" as PMV
+}
+
+REG --> T1
+REG --> T2
+REG --> T3
+REG --> T4
+REG --> T5
+
+ORCH --> EXEC : get_tool_definitions()
+EXEC --> REG : MCP_TOOLS
+ORCH --> CONV : offer tools each LLM step
+CONV --> LLM : OpenAI function-calling format
+LLM --> ORCH : tool_calls (model chooses)
+ORCH --> EXEC : execute(name, args)
+
+EXEC --> T1
+EXEC --> T2
+EXEC --> T3
+EXEC --> T4
+EXEC --> T5
+
+T1 --> WRITE
+T2 --> WRITE
+T3 --> READ
+T4 --> READ
+T5 --> PMV
+
+note right of REG
+  **One logical MCP server**
+  Not a separate multi-process
+  MCP daemon — schemas live in
+  mcp_server.py and are converted
+  to OpenAI tools at call time.
+end note
+
+note bottom of LLM
+  Trigger: LLM cadence steps only.
+  Model decides which tool to call.
+  Prompt steers toward T1 + T2.
+end note
+
+@enduml
