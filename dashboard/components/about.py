@@ -39,7 +39,7 @@ We always compare against a **baseline day** with the same weather and building,
 | **Electricity cut** | % less kWh than the normal schedule for the same day |
 | **People comfortable** | Share of *occupied* zone-steps where comfort (PMV) stayed in band — always compared to the no-AI baseline when available |
 | **Power used today** | Absolute kWh with EcoLoop vs without |
-| **Safety catches** | How many times hard limits blocked or corrected a request |
+| **Simulated day** | How far through the 96-step (24 h) simulation we are |
 | **Electricity chart** | Cumulative kWh over the day — shaded gap = energy saved |
 | **Temperature chart** | Room °C vs the AI’s cooling target vs outdoor weather |
 | **Occupancy chart** | When people were actually in the zone |

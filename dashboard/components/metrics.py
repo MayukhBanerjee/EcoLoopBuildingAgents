@@ -12,13 +12,12 @@ def render_kpi_row(
     comfort_pct: float | None = None,
     agent_kwh: float | None = None,
     baseline_kwh: float | None = None,
-    clamps_count: int = 0,
     steps_completed: int = 0,
     total_steps: int = 96,
     *,
     kpis: dict[str, Any] | None = None,
 ) -> None:
-    """Render the 5-card KPI strip with first-time-viewer friendly copy."""
+    """Render the KPI strip with first-time-viewer friendly copy."""
     baseline_comfort = None
     comfort_delta = None
     if kpis is not None:
@@ -26,7 +25,6 @@ def render_kpi_row(
         comfort_pct = kpis.get("comfort_compliance_pct")
         agent_kwh = kpis.get("agent_kwh")
         baseline_kwh = kpis.get("baseline_kwh")
-        clamps_count = int(kpis.get("total_clamp_events") or 0)
         steps_completed = int(kpis.get("timesteps_agent") or kpis.get("decisions_count") or 0)
         total_steps = int(kpis.get("timesteps_baseline") or 96)
         baseline_comfort = kpis.get("baseline_comfort_compliance_pct")
@@ -71,11 +69,6 @@ def render_kpi_row(
             <div class="kpi-label">Power used today</div>
             <div class="kpi-value navy">{agent_kwh:.1f}<span class="kpi-unit">kWh</span></div>
             <div class="kpi-hint">Normal schedule would use {baseline_kwh:.1f} kWh</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Safety catches</div>
-            <div class="kpi-value danger">{clamps_count}</div>
-            <div class="kpi-hint">Times hard limits blocked unsafe settings</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Simulated day</div>
