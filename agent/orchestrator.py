@@ -1,20 +1,11 @@
 """
-orchestrator.py — closed-loop control heartbeat.
+orchestrator.py — closed-loop control heartbeat (Phase 4).
 
-Called every non-warmup EnergyPlus timestep via EPRunner callback:
-  1. EPReader  → SensorReading
-  2. Seed EPWriter ramp baseline from first-step sensor data
-  3. Assemble prompt (memory + grid context + sensors)
-  4. LLMClient → response with tool_calls
-  5. ToolExecutor → execute each tool call; accumulate ControlAction
-  6. EPWriter.apply()  → inject clamped setpoints into EnergyPlus
-  7. Log decision to JSONL  (data/agent/<run_id>/decisions.jsonl)
-  8. AgentMemory.append()
-  9. On LLMUnavailable → fallback.safe_action()
+Every non-warmup EnergyPlus timestep:
+  read → (optional LLM) → tools → clamp/apply → JSONL flush → memory
 
-The agent calls the LLM every AGENT_EVERY_N_STEPS timesteps (default 1).
-Each LLM round supports up to MAX_TOOL_ROUNDS tool-call iterations so the
-agent can: read → report → set per-zone → predict → set again.
+INV-6/7: any failure inside step() applies fallback.safe_action() and never
+propagates into EnergyPlus (EPRunner also swallows exceptions).
 """
 
 from __future__ import annotations
@@ -26,17 +17,21 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent.artifacts import write_actuator_timeline, write_runtime_final_state_idf
 from agent.grid import carbon_intensity, intensity_label, peak_status
 from agent.llm_client import LLMClient, LLMUnavailable
 from agent.memory import AgentMemory
 from agent.prompts import SYSTEM_PROMPT, build_timestep_prompt
 from agent.tools import ToolExecutor
+from bridge.constants import CONTROLLED_ZONES
 from bridge.fallback import safe_action
+from bridge.ep_writer import ControlAction
 
 logger = logging.getLogger("EcoLoop.agent.orchestrator")
 
 # Maximum tool-call rounds per timestep (prevents runaway loops)
-MAX_TOOL_ROUNDS = 6
+def _max_tool_rounds() -> int:
+    return max(1, int(os.getenv("AGENT_MAX_TOOL_ROUNDS", "4")))
 
 
 class EcoLoopOrchestrator:
@@ -51,6 +46,8 @@ class EcoLoopOrchestrator:
         baseline_kwh: float | None = None,
         run_id: str | None = None,
         agent_every_n_steps: int | None = None,
+        output_dir: str | Path | None = None,
+        source_idf: str | Path | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -59,49 +56,67 @@ class EcoLoopOrchestrator:
         self.memory = AgentMemory(window=3)
         self.timestep = 0
         self.decision_log: list[dict[str, Any]] = []
+        self.actuator_timeline: list[dict[str, Any]] = []
         self._seeded = False
+        self._last_action = ControlAction()
+        self.source_idf = Path(source_idf) if source_idf else None
 
-        # How often to invoke the LLM (1 = every timestep, 4 = once per hour)
         env_n = int(os.getenv("AGENT_EVERY_N_STEPS", "1"))
         self._every_n = agent_every_n_steps if agent_every_n_steps is not None else env_n
         self._every_n = max(1, self._every_n)
 
-        # JSONL decision log path
         run_tag = run_id or time.strftime("%Y%m%d_%H%M%S")
-        self._log_dir = Path("data/agent") / run_tag
+        if output_dir is not None:
+            self._log_dir = Path(output_dir)
+        else:
+            self._log_dir = Path("data/agent_results") / run_tag
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._log_path = self._log_dir / "decisions.jsonl"
+        # Plan name + alias for compatibility
+        self._log_path = self._log_dir / "agent_decisions.jsonl"
+        self._log_alias = self._log_dir / "decisions.jsonl"
+        self.run_id = run_tag
         logger.info(
             "Orchestrator ready. every_n=%d log=%s", self._every_n, self._log_path
         )
 
     # ------------------------------------------------------------------
-    # Timestep callback (called by EPRunner)
+    # Timestep callback
     # ------------------------------------------------------------------
 
     def step(self, state: Any) -> None:
         """Called by EnergyPlus at every non-warmup zone timestep."""
         self.timestep += 1
+        try:
+            self._step_inner(state)
+        except Exception as exc:  # noqa: BLE001 — INV-6/7 never abort EP
+            logger.exception("Orchestrator step failed at T%d: %s", self.timestep, exc)
+            try:
+                reading = getattr(self.reader, "_latest_reading", None)
+                occ = reading.occupancy if reading is not None else {}
+                events = self.writer.apply(safe_action(), occupancy=occ)
+                self._record_fallback_entry(
+                    reasoning=f"[FALLBACK] Unhandled error: {exc}",
+                    clamp_events=events,
+                    reading=reading,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Fallback apply also failed at T%d", self.timestep)
 
-        # --- 1. Read sensors ---
+    def _step_inner(self, state: Any) -> None:
+        # 1. Read sensors
         reading = self.reader.read(self.timestep)
-        # Stash on reader so ToolExecutor can access it without a direct ref
         self.reader._latest_reading = reading
 
-        # --- 2. Seed writer ramp baseline on first real timestep ---
+        # 2. Seed ramp baselines once
         if not self._seeded:
-            self.writer.seed_from_sensors(reading.cooling_setpoints, reading.heating_setpoints)
+            self.writer.seed_from_sensors(
+                reading.cooling_setpoints, reading.heating_setpoints
+            )
             self._seeded = True
 
-        # --- 3. Skip LLM call if not on schedule ---
-        if (self.timestep - 1) % self._every_n != 0:
-            return
-
-        # --- 4. Build context for LLM ---
-        sim_minute_total = (self.timestep - 1) * 15  # 15-min timesteps
+        sim_minute_total = (self.timestep - 1) * 15
         sim_hour = (sim_minute_total // 60) % 24
         sim_minute = sim_minute_total % 60
-
         step_kw = (reading.energy_step_j / 3_600_000.0) * 4.0
         threshold_kw = float(os.getenv("PEAK_DEMAND_THRESHOLD_KW", "55.0"))
         grid_ctx = {
@@ -112,18 +127,42 @@ class EcoLoopOrchestrator:
             "threshold_kw": threshold_kw,
         }
 
-        memory_block = self.memory.render()
-        sensor_compact = reading.to_compact()
+        # 3. Cadence throttle — hold last setpoints between LLM decisions
+        if (self.timestep - 1) % self._every_n != 0:
+            # Re-apply last action so actuators stay owned between LLM calls
+            if self._has_actions(self._last_action):
+                events = self.writer.apply(self._last_action, occupancy=reading.occupancy)
+                self._append_timeline(
+                    self._last_action, sim_hour, sim_minute, fallback=False
+                )
+            else:
+                events = []
+            self._record_entry(
+                reading=reading,
+                sim_hour=sim_hour,
+                sim_minute=sim_minute,
+                step_kw=step_kw,
+                grid_ctx=grid_ctx,
+                reasoning="[HOLD] Between LLM cadence steps — holding last setpoints.",
+                tool_calls=[],
+                action=self._last_action,
+                clamp_events=events,
+                fallback_used=False,
+                held=True,
+            )
+            return
+
+        # 4. Build prompt
         user_prompt = build_timestep_prompt(
-            sensor_compact,
+            reading.to_compact(),
             grid_ctx,
-            memory_block,
+            self.memory.render(),
             timestep=self.timestep,
             sim_hour=sim_hour,
             sim_minute=sim_minute,
         )
 
-        # --- 5. Tool-calling loop ---
+        # 5. Tool-calling loop
         tool_executor = ToolExecutor(
             self.reader,
             self.writer,
@@ -137,39 +176,44 @@ class EcoLoopOrchestrator:
         fallback_used = False
 
         try:
-            for _round in range(MAX_TOOL_ROUNDS):
+            for _round in range(_max_tool_rounds()):
                 resp = self.llm.run_with_tools(SYSTEM_PROMPT, messages, tool_defs)
                 msg = resp.choices[0].message
-
-                # Capture reasoning from text content
                 if msg.content:
                     reasoning_text = str(msg.content).strip()
-
-                # No tool calls → agent is done deciding
                 if not msg.tool_calls:
                     break
 
-                # Execute all tool calls in this round
                 tool_results: list[dict[str, Any]] = []
                 for tc in msg.tool_calls:
-                    name = tc.function.name if hasattr(tc, "function") else tc.get("function", {}).get("name", "")
-                    raw_args = tc.function.arguments if hasattr(tc, "function") else tc.get("function", {}).get("arguments", "{}")
+                    name = (
+                        tc.function.name
+                        if hasattr(tc, "function")
+                        else tc.get("function", {}).get("name", "")
+                    )
+                    raw_args = (
+                        tc.function.arguments
+                        if hasattr(tc, "function")
+                        else tc.get("function", {}).get("arguments", "{}")
+                    )
                     try:
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     except json.JSONDecodeError:
                         args = {}
 
                     result = tool_executor.execute(name, args)
-                    recorded_tool_calls.append({"tool": name, "args": args, "result": result})
+                    recorded_tool_calls.append(
+                        {"tool": name, "args": args, "result": result}
+                    )
+                    tc_id = tc.id if hasattr(tc, "id") else f"tc_{_round}"
                     tool_results.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tc.id if hasattr(tc, "id") else f"tc_{_round}",
+                            "tool_call_id": tc_id,
                             "content": json.dumps(result, default=str),
                         }
                     )
 
-                # Feed tool results back into conversation
                 messages.append(
                     {
                         "role": "assistant",
@@ -179,8 +223,16 @@ class EcoLoopOrchestrator:
                                 "id": tc.id if hasattr(tc, "id") else f"tc_{_round}",
                                 "type": "function",
                                 "function": {
-                                    "name": (tc.function.name if hasattr(tc, "function") else tc.get("function", {}).get("name", "")),
-                                    "arguments": (tc.function.arguments if hasattr(tc, "function") else tc.get("function", {}).get("arguments", "{}")),
+                                    "name": (
+                                        tc.function.name
+                                        if hasattr(tc, "function")
+                                        else tc.get("function", {}).get("name", "")
+                                    ),
+                                    "arguments": (
+                                        tc.function.arguments
+                                        if hasattr(tc, "function")
+                                        else tc.get("function", {}).get("arguments", "{}")
+                                    ),
                                 },
                             }
                             for tc in msg.tool_calls
@@ -190,67 +242,43 @@ class EcoLoopOrchestrator:
                 messages.extend(tool_results)
 
         except LLMUnavailable as exc:
-            logger.warning("LLM unavailable at T%d: %s. Applying fallback.", self.timestep, exc)
+            logger.warning(
+                "LLM unavailable at T%d: %s. Applying fallback.", self.timestep, exc
+            )
             tool_executor.pending_action = safe_action()
             fallback_used = True
             reasoning_text = f"[FALLBACK] LLM unavailable: {exc}"
 
-        # --- 6. Apply accumulated control action ---
-        clamp_events = self.writer.apply(
-            tool_executor.pending_action,
-            occupancy=reading.occupancy,
-        )
+        action = tool_executor.pending_action
+        # If LLM read-only with no writes, hold previous action (or safe first step)
+        if not self._has_actions(action):
+            if self._has_actions(self._last_action):
+                action = self._last_action
+            else:
+                action = safe_action()
+                if not fallback_used:
+                    reasoning_text = (
+                        (reasoning_text + "\n") if reasoning_text else ""
+                    ) + "[AUTO] No control tools called — applying safe hold setpoints."
 
-        # --- 7. Build decision log entry ---
-        actions_summary = [
-            {
-                "zone": zone,
-                "cooling_setpoint": tool_executor.pending_action.cooling_setpoints.get(zone),
-                "heating_setpoint": tool_executor.pending_action.heating_setpoints.get(zone),
-                "lighting_level": tool_executor.pending_action.lighting_levels.get(zone),
-            }
-            for zone in sorted(
-                set(tool_executor.pending_action.cooling_setpoints)
-                | set(tool_executor.pending_action.heating_setpoints)
-                | set(tool_executor.pending_action.lighting_levels)
-            )
-        ]
-        actions_summary = [
-            {k: v for k, v in a.items() if v is not None}
-            for a in actions_summary
-        ]
+        # 6. Apply
+        clamp_events = self.writer.apply(action, occupancy=reading.occupancy)
+        self._last_action = action
+        self._append_timeline(action, sim_hour, sim_minute, fallback=fallback_used)
 
-        clamp_summary = [
-            {"zone": e.zone, "field": e.field, "rule": e.rule, "req": round(e.requested, 2), "applied": round(e.applied, 2)}
-            for e in clamp_events
-        ]
-
-        entry: dict[str, Any] = {
-            "timestep": self.timestep,
-            "sim_hour": sim_hour,
-            "sim_minute": sim_minute,
-            "fallback_used": fallback_used,
-            "energy_kwh": round(reading.energy_consumption_kwh, 3),
-            "demand_kw": round(step_kw, 2),
-            "grid_label": grid_ctx["label"],
-            "peak_status": grid_ctx["peak_status"],
-            "reasoning": reasoning_text,
-            "tool_calls": recorded_tool_calls,
-            "actions_applied": actions_summary,
-            "clamp_events": clamp_summary,
-            "tokens_used_total": self.llm.total_tokens,
-        }
-        self.decision_log.append(entry)
-        self._write_log_entry(entry)
-
-        # --- 8. Update memory ---
-        short_summary = reasoning_text[:120] if reasoning_text else "no reasoning"
-        self.memory.append(
-            timestep=self.timestep,
-            summary=short_summary,
-            actions=actions_summary,
-            energy_kwh=reading.energy_consumption_kwh,
+        # 7–8. Log + memory
+        self._record_entry(
+            reading=reading,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            step_kw=step_kw,
+            grid_ctx=grid_ctx,
+            reasoning=reasoning_text,
+            tool_calls=recorded_tool_calls,
+            action=action,
+            clamp_events=clamp_events,
             fallback_used=fallback_used,
+            held=False,
         )
 
         logger.info(
@@ -262,57 +290,255 @@ class EcoLoopOrchestrator:
             reading.energy_consumption_kwh,
             step_kw,
             grid_ctx["label"],
-            len(actions_summary),
+            len(action.cooling_setpoints)
+            + len(action.heating_setpoints)
+            + len(action.lighting_levels),
             len(clamp_events),
             fallback_used,
         )
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Logging helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _has_actions(action: ControlAction) -> bool:
+        return bool(
+            action.cooling_setpoints
+            or action.heating_setpoints
+            or action.lighting_levels
+        )
+
+    def _actions_summary(self, action: ControlAction) -> list[dict[str, Any]]:
+        zones = sorted(
+            set(action.cooling_setpoints)
+            | set(action.heating_setpoints)
+            | set(action.lighting_levels)
+        )
+        rows: list[dict[str, Any]] = []
+        for zone in zones:
+            row: dict[str, Any] = {"zone": zone}
+            if zone in action.cooling_setpoints:
+                row["cooling_setpoint"] = action.cooling_setpoints[zone]
+            if zone in action.heating_setpoints:
+                row["heating_setpoint"] = action.heating_setpoints[zone]
+            if zone in action.lighting_levels:
+                row["lighting_level"] = action.lighting_levels[zone]
+            rows.append(row)
+        return rows
+
+    def _append_timeline(
+        self,
+        action: ControlAction,
+        sim_hour: int,
+        sim_minute: int,
+        *,
+        fallback: bool,
+    ) -> None:
+        for zone in CONTROLLED_ZONES:
+            cool = action.cooling_setpoints.get(zone, self.writer.last_cooling.get(zone))
+            heat = action.heating_setpoints.get(zone, self.writer.last_heating.get(zone))
+            light = action.lighting_levels.get(zone)
+            if cool is None and heat is None and light is None:
+                continue
+            self.actuator_timeline.append(
+                {
+                    "timestep": self.timestep,
+                    "sim_hour": sim_hour,
+                    "sim_minute": sim_minute,
+                    "zone": zone,
+                    "cooling_c": "" if cool is None else round(float(cool), 2),
+                    "heating_c": "" if heat is None else round(float(heat), 2),
+                    "lights_fraction": "" if light is None else round(float(light), 3),
+                    "fallback": fallback,
+                }
+            )
+
+    def _record_entry(
+        self,
+        *,
+        reading: Any,
+        sim_hour: int,
+        sim_minute: int,
+        step_kw: float,
+        grid_ctx: dict[str, Any],
+        reasoning: str,
+        tool_calls: list[dict[str, Any]],
+        action: ControlAction,
+        clamp_events: list[Any],
+        fallback_used: bool,
+        held: bool,
+    ) -> None:
+        actions_summary = self._actions_summary(action)
+        clamp_summary = [
+            {
+                "zone": e.zone,
+                "field": e.field,
+                "rule": e.rule,
+                "req": round(e.requested, 2),
+                "applied": round(e.applied, 2),
+            }
+            for e in clamp_events
+        ]
+        entry: dict[str, Any] = {
+            "timestep": self.timestep,
+            "sim_hour": sim_hour,
+            "sim_minute": sim_minute,
+            "fallback": fallback_used,
+            "fallback_used": fallback_used,  # alias
+            "held": held,
+            "energy_kwh": round(reading.energy_consumption_kwh, 3),
+            "demand_kw": round(step_kw, 2),
+            "grid_label": grid_ctx["label"],
+            "peak_status": grid_ctx["peak_status"],
+            "reasoning": reasoning,
+            "actions": actions_summary,  # plan name
+            "actions_applied": actions_summary,
+            "sensor_snapshot": reading.to_compact(),
+            "tool_calls": tool_calls,
+            "clamp_events": clamp_summary,
+            "tokens_used_total": self.llm.total_tokens,
+        }
+        self.decision_log.append(entry)
+        self._write_log_entry(entry)
+
+        if not held:
+            self.memory.append(
+                timestep=self.timestep,
+                summary=(reasoning[:120] if reasoning else "no reasoning"),
+                actions=actions_summary,
+                energy_kwh=reading.energy_consumption_kwh,
+                fallback_used=fallback_used,
+            )
+
+    def _record_fallback_entry(
+        self,
+        *,
+        reasoning: str,
+        clamp_events: list[Any],
+        reading: Any,
+    ) -> None:
+        sim_minute_total = (self.timestep - 1) * 15
+        sim_hour = (sim_minute_total // 60) % 24
+        sim_minute = sim_minute_total % 60
+        action = safe_action()
+        self._last_action = action
+        self._append_timeline(action, sim_hour, sim_minute, fallback=True)
+        energy = reading.energy_consumption_kwh if reading is not None else 0.0
+        step_j = reading.energy_step_j if reading is not None else 0.0
+        step_kw = (step_j / 3_600_000.0) * 4.0
+        grid_ctx = {
+            "label": intensity_label(sim_hour),
+            "peak_status": peak_status(step_kw),
+        }
+        # Minimal reading stub if needed
+        if reading is None:
+            from bridge.ep_reader import SensorReading
+
+            reading = SensorReading(timestep=self.timestep)
+        self._record_entry(
+            reading=reading,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            step_kw=step_kw,
+            grid_ctx=grid_ctx,
+            reasoning=reasoning,
+            tool_calls=[],
+            action=action,
+            clamp_events=clamp_events,
+            fallback_used=True,
+            held=False,
+        )
+
     def _write_log_entry(self, entry: dict[str, Any]) -> None:
-        """Append one JSONL line (flush immediately for crash safety)."""
+        """Append one JSONL line and flush (T4.4 kill-mid-run safe)."""
+        line = json.dumps(entry, default=str) + "\n"
         try:
             with self._log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry, default=str) + "\n")
+                fh.write(line)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            with self._log_alias.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to write decision log: %s", exc)
 
+    # ------------------------------------------------------------------
+    # End-of-run artifacts
+    # ------------------------------------------------------------------
+
     def save_summary(self) -> Path:
-        """Write run-level summary JSON next to the decision log."""
+        """Write summary.json + Phase 4 artifacts."""
         if not self.decision_log:
-            logger.warning("No decisions logged; skipping summary.")
-            return self._log_path.parent / "summary.json"
+            logger.warning("No decisions logged; writing empty summary.")
+            summary = {
+                "run_id": self.run_id,
+                "total_timesteps": 0,
+                "error": "no decisions logged",
+            }
+        else:
+            total_steps = len(self.decision_log)
+            fallback_count = sum(
+                1 for d in self.decision_log if d.get("fallback") or d.get("fallback_used")
+            )
+            total_clamps = sum(len(d.get("clamp_events", [])) for d in self.decision_log)
+            final_kwh = float(self.decision_log[-1]["energy_kwh"])
+            baseline = float(self.baseline_kwh or 0.0)
+            savings_kwh = baseline - final_kwh
+            savings_pct = (savings_kwh / baseline * 100.0) if baseline > 0 else 0.0
 
-        total_steps = len(self.decision_log)
-        fallback_count = sum(1 for d in self.decision_log if d["fallback_used"])
-        total_clamps = sum(len(d["clamp_events"]) for d in self.decision_log)
-        final_kwh = self.decision_log[-1]["energy_kwh"]
-        savings_kwh = (self.baseline_kwh or 0) - final_kwh
-        savings_pct = (savings_kwh / self.baseline_kwh * 100.0) if self.baseline_kwh else 0.0
-
-        summary = {
-            "run_id": self._log_dir.name,
-            "total_timesteps": total_steps,
-            "llm_calls": self.llm.total_calls,
-            "total_tokens": self.llm.total_tokens,
-            "fallback_count": fallback_count,
-            "total_clamp_events": total_clamps,
-            "baseline_kwh": round(self.baseline_kwh or 0, 3),
-            "agent_final_kwh": round(final_kwh, 3),
-            "savings_kwh": round(savings_kwh, 3),
-            "savings_pct": round(savings_pct, 1),
-        }
+            summary = {
+                "run_id": self.run_id,
+                "total_timesteps": total_steps,
+                "llm_calls": self.llm.total_calls,
+                "total_tokens": self.llm.total_tokens,
+                "fallback_count": fallback_count,
+                "total_clamp_events": total_clamps,
+                "baseline_kwh": round(baseline, 3),
+                "agent_final_kwh": round(final_kwh, 3),
+                "savings_kwh": round(savings_kwh, 3),
+                "savings_pct": round(savings_pct, 1),
+                "decision_log": str(self._log_path),
+            }
 
         summary_path = self._log_dir / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         logger.info("Run summary saved to %s", summary_path)
-        logger.info(
-            "RESULT: baseline=%.2f kWh | agent=%.2f kWh | savings=%.2f kWh (%.1f%%)",
-            self.baseline_kwh or 0,
-            final_kwh,
-            savings_kwh,
-            savings_pct,
+
+        # Actuator timeline
+        write_actuator_timeline(
+            self.actuator_timeline, self._log_dir / "actuator_timeline.csv"
         )
+
+        # Final IDF
+        if self.source_idf and self.source_idf.is_file():
+            write_runtime_final_state_idf(
+                source_idf=self.source_idf,
+                out_path=self._log_dir / "runtime_final_state.idf",
+                final_cooling=dict(self.writer.last_cooling),
+                final_heating=dict(self.writer.last_heating),
+                final_lights={
+                    z: self._last_action.lighting_levels.get(z, 0.0)
+                    for z in CONTROLLED_ZONES
+                    if z in self._last_action.lighting_levels
+                    or z in self.writer.last_cooling
+                },
+                run_id=self.run_id,
+                summary=summary,
+            )
+        else:
+            logger.warning("source_idf missing — skipped runtime_final_state.idf")
+
+        if "agent_final_kwh" in summary:
+            logger.info(
+                "RESULT: baseline=%.2f kWh | agent=%.2f kWh | savings=%.2f kWh (%.1f%%)",
+                summary.get("baseline_kwh", 0),
+                summary["agent_final_kwh"],
+                summary.get("savings_kwh", 0),
+                summary.get("savings_pct", 0),
+            )
         return summary_path

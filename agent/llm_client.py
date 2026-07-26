@@ -26,7 +26,7 @@ from typing import Any
 
 logger = logging.getLogger("EcoLoop.agent.llm")
 
-CALL_SPACING_S: float = 2.0
+CALL_SPACING_S: float = float(os.getenv("AGENT_CALL_SPACING_S", "2.0"))
 TIMEOUT_S: float = 15.0
 TEMPERATURE: float = 0.2
 MAX_TOKENS: int = 600
@@ -52,16 +52,23 @@ class LLMClient:
         self.total_tokens: int = 0
         self.total_calls: int = 0
         self._last_call_ts: float = 0.0
+        self._api_key = api_key
+        self._key_missing = (
+            not api_key
+            or api_key.startswith("gsk_your")
+            or api_key.strip() == ""
+        )
         self._client = OpenAI(
-            api_key=api_key,
+            api_key=api_key or "missing-key",
             base_url=base_url,
             timeout=TIMEOUT_S,
         )
         logger.info(
-            "LLMClient ready: model=%s base=%s dev=%s",
+            "LLMClient ready: model=%s base=%s dev=%s key_set=%s",
             self.model,
             base_url,
             dev_mode,
+            not self._key_missing,
         )
 
     # ------------------------------------------------------------------
@@ -108,9 +115,10 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     def _enforce_spacing(self) -> None:
+        spacing = float(os.getenv("AGENT_CALL_SPACING_S", str(CALL_SPACING_S)))
         elapsed = time.monotonic() - self._last_call_ts
-        if elapsed < CALL_SPACING_S:
-            wait = CALL_SPACING_S - elapsed
+        if elapsed < spacing:
+            wait = spacing - elapsed
             logger.debug("Rate-limit spacing: sleeping %.2fs", wait)
             time.sleep(wait)
 
@@ -261,6 +269,9 @@ class LLMClient:
         """
         openai_tools = self.mcp_tools_to_openai(tools)
         full_messages: list[dict] = [{"role": "system", "content": system}, *messages]
+
+        if self._key_missing:
+            raise LLMUnavailable("GROQ_API_KEY not set — chaos-drill / offline mode.")
 
         # --- initial call (+ one retry on failure) ---
         resp = self._attempt(full_messages, openai_tools)

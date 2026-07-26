@@ -47,6 +47,13 @@ SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1
   4. Max setpoint change: 2 °C per timestep (ramp rate INV-4).
   5. Lighting: ≥ 0.3 in occupied zones, 0.0–1.0 otherwise.
 
+## Energy-first rules (critical for savings)
+  - Prefer raising cooling setpoints and dimming lights over tightening comfort.
+  - Never set cooling BELOW the current zone temperature unless occupied AND PMV > +0.5.
+  - Unoccupied zones: cooling 27–28 °C, heating 16–18 °C, lights 0.0.
+  - Occupied zones: target the warm edge of comfort (cooling ~24–25 °C) unless PMV > +0.5.
+  - Always act on EVERY unoccupied zone every timestep — do not leave schedule defaults.
+
 ## Decision strategy (follow this order every timestep)
   Step 1. Call read_sensors — understand current state.
   Step 2. Identify over-conditioned zones and unoccupied zones.
