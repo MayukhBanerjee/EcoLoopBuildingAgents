@@ -21,7 +21,12 @@ from agent.artifacts import write_actuator_timeline, write_runtime_final_state_i
 from agent.grid import carbon_intensity, intensity_label, peak_status
 from agent.llm_client import LLMClient, LLMUnavailable
 from agent.memory import AgentMemory
-from agent.prompts import SYSTEM_PROMPT, build_timestep_prompt
+from agent.policy import describe_policy_action, policy_action
+from agent.prompts import (
+    SYSTEM_PROMPT,
+    build_action_nudge_prompt,
+    build_timestep_prompt,
+)
 from agent.tools import ToolExecutor
 from bridge.constants import CONTROLLED_ZONES
 from bridge.fallback import safe_action
@@ -93,11 +98,16 @@ class EcoLoopOrchestrator:
             try:
                 reading = getattr(self.reader, "_latest_reading", None)
                 occ = reading.occupancy if reading is not None else {}
-                events = self.writer.apply(safe_action(), occupancy=occ)
+                action = policy_action(reading) if reading is not None else safe_action()
+                events = self.writer.apply(action, occupancy=occ)
                 self._record_fallback_entry(
-                    reasoning=f"[FALLBACK] Unhandled error: {exc}",
+                    reasoning=(
+                        f"[FALLBACK] Unhandled error: {exc}. "
+                        f"Adaptive policy applied."
+                    ),
                     clamp_events=events,
                     reading=reading,
+                    action=action,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("Fallback apply also failed at T%d", self.timestep)
@@ -162,7 +172,7 @@ class EcoLoopOrchestrator:
             sim_minute=sim_minute,
         )
 
-        # 5. Tool-calling loop
+        # 5. Tool-calling loop (+ one action-nudge if LLM only observes)
         tool_executor = ToolExecutor(
             self.reader,
             self.writer,
@@ -174,92 +184,78 @@ class EcoLoopOrchestrator:
         recorded_tool_calls: list[dict[str, Any]] = []
         reasoning_text = ""
         fallback_used = False
+        nudged = False
+        sensor_compact = reading.to_compact()
 
         try:
-            for _round in range(_max_tool_rounds()):
+            rounds = _max_tool_rounds()
+            for _round in range(rounds):
                 resp = self.llm.run_with_tools(SYSTEM_PROMPT, messages, tool_defs)
+                self._ingest_llm_message(
+                    resp.choices[0].message,
+                    tool_executor,
+                    messages,
+                    recorded_tool_calls,
+                    round_id=_round,
+                )
                 msg = resp.choices[0].message
                 if msg.content:
                     reasoning_text = str(msg.content).strip()
                 if not msg.tool_calls:
                     break
+                # Stop early once we have real control actions queued
+                if self._has_actions(tool_executor.pending_action):
+                    break
 
-                tool_results: list[dict[str, Any]] = []
-                for tc in msg.tool_calls:
-                    name = (
-                        tc.function.name
-                        if hasattr(tc, "function")
-                        else tc.get("function", {}).get("name", "")
-                    )
-                    raw_args = (
-                        tc.function.arguments
-                        if hasattr(tc, "function")
-                        else tc.get("function", {}).get("arguments", "{}")
-                    )
-                    try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    result = tool_executor.execute(name, args)
-                    recorded_tool_calls.append(
-                        {"tool": name, "args": args, "result": result}
-                    )
-                    tc_id = tc.id if hasattr(tc, "id") else f"tc_{_round}"
-                    tool_results.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc_id,
-                            "content": json.dumps(result, default=str),
-                        }
-                    )
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id if hasattr(tc, "id") else f"tc_{_round}",
-                                "type": "function",
-                                "function": {
-                                    "name": (
-                                        tc.function.name
-                                        if hasattr(tc, "function")
-                                        else tc.get("function", {}).get("name", "")
-                                    ),
-                                    "arguments": (
-                                        tc.function.arguments
-                                        if hasattr(tc, "function")
-                                        else tc.get("function", {}).get("arguments", "{}")
-                                    ),
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
-                    }
+            # Nudge: LLM observed but never wrote → one corrective round
+            if not self._has_actions(tool_executor.pending_action):
+                nudged = True
+                logger.info(
+                    "T%d: no control tools from LLM — firing action nudge.",
+                    self.timestep,
                 )
-                messages.extend(tool_results)
+                nudge = build_action_nudge_prompt(
+                    sensor_compact, timestep=self.timestep
+                )
+                messages.append({"role": "user", "content": nudge})
+                resp = self.llm.run_with_tools(SYSTEM_PROMPT, messages, tool_defs)
+                self._ingest_llm_message(
+                    resp.choices[0].message,
+                    tool_executor,
+                    messages,
+                    recorded_tool_calls,
+                    round_id=rounds,
+                )
+                if resp.choices[0].message.content:
+                    reasoning_text = (
+                        (reasoning_text + "\n") if reasoning_text else ""
+                    ) + str(resp.choices[0].message.content).strip()
 
         except LLMUnavailable as exc:
             logger.warning(
-                "LLM unavailable at T%d: %s. Applying fallback.", self.timestep, exc
+                "LLM unavailable at T%d: %s. Applying adaptive policy.",
+                self.timestep,
+                exc,
             )
-            tool_executor.pending_action = safe_action()
+            tool_executor.pending_action = policy_action(reading)
             fallback_used = True
-            reasoning_text = f"[FALLBACK] LLM unavailable: {exc}"
+            reasoning_text = (
+                f"[FALLBACK] LLM unavailable: {exc}. "
+                f"Adaptive policy: {describe_policy_action(tool_executor.pending_action, reading.occupancy)}"
+            )
 
         action = tool_executor.pending_action
-        # If LLM read-only with no writes, hold previous action (or safe first step)
+        # Still no writes after nudge → adaptive occupancy-aware policy (not static 22/20)
         if not self._has_actions(action):
-            if self._has_actions(self._last_action):
-                action = self._last_action
-            else:
-                action = safe_action()
-                if not fallback_used:
-                    reasoning_text = (
-                        (reasoning_text + "\n") if reasoning_text else ""
-                    ) + "[AUTO] No control tools called — applying safe hold setpoints."
+            action = policy_action(reading)
+            tag = "[NUDGE-MISS]" if nudged else "[AUTO]"
+            if not fallback_used:
+                reasoning_text = (
+                    (reasoning_text + "\n") if reasoning_text else ""
+                ) + (
+                    f"{tag} No control tools called — applying adaptive policy: "
+                    f"{describe_policy_action(action, reading.occupancy)}"
+                )
 
         # 6. Apply
         clamp_events = self.writer.apply(action, occupancy=reading.occupancy)
@@ -300,6 +296,67 @@ class EcoLoopOrchestrator:
     # ------------------------------------------------------------------
     # Logging helpers
     # ------------------------------------------------------------------
+
+    def _ingest_llm_message(
+        self,
+        msg: Any,
+        tool_executor: ToolExecutor,
+        messages: list[dict[str, Any]],
+        recorded_tool_calls: list[dict[str, Any]],
+        *,
+        round_id: int,
+    ) -> None:
+        """Execute tool_calls on msg (if any) and append them to the conversation."""
+        if not msg.tool_calls:
+            return
+
+        tool_results: list[dict[str, Any]] = []
+        openai_tool_calls: list[dict[str, Any]] = []
+        for i, tc in enumerate(msg.tool_calls):
+            name = (
+                tc.function.name
+                if hasattr(tc, "function")
+                else tc.get("function", {}).get("name", "")
+            )
+            raw_args = (
+                tc.function.arguments
+                if hasattr(tc, "function")
+                else tc.get("function", {}).get("arguments", "{}")
+            )
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+
+            result = tool_executor.execute(name, args)
+            recorded_tool_calls.append({"tool": name, "args": args, "result": result})
+            tc_id = tc.id if hasattr(tc, "id") else f"tc_{round_id}_{i}"
+            tool_results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
+            openai_tool_calls.append(
+                {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": raw_args if isinstance(raw_args, str) else json.dumps(raw_args),
+                    },
+                }
+            )
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": openai_tool_calls,
+            }
+        )
+        messages.extend(tool_results)
 
     @staticmethod
     def _has_actions(action: ControlAction) -> bool:
@@ -417,11 +474,12 @@ class EcoLoopOrchestrator:
         reasoning: str,
         clamp_events: list[Any],
         reading: Any,
+        action: ControlAction | None = None,
     ) -> None:
         sim_minute_total = (self.timestep - 1) * 15
         sim_hour = (sim_minute_total // 60) % 24
         sim_minute = sim_minute_total % 60
-        action = safe_action()
+        action = action or (policy_action(reading) if reading is not None else safe_action())
         self._last_action = action
         self._append_timeline(action, sim_hour, sim_minute, fallback=True)
         energy = reading.energy_consumption_kwh if reading is not None else 0.0
