@@ -1,0 +1,24 @@
+{
+  "status": "complete",
+  "run_id": "20260726_172040_dev",
+  "model": "llama-3.1-8b-instant",
+  "baseline_kwh": 172.481,
+  "agent_kwh": 114.103,
+  "savings_kwh": 58.378,
+  "savings_pct": 33.8,
+  "comfort_compliance_pct": 33.2,
+  "comfort_occupied_steps": 244,
+  "comfort_ok_steps": 81,
+  "fallback_count": 0,
+  "decisions_count": 96,
+  "llm_calls": 79,
+  "total_tokens": 257411,
+  "timesteps_baseline": 96,
+  "timesteps_agent": 96,
+  "total_clamp_events": 272,
+  "files": {
+    "energy_timeseries": "data\\comparison\\energy_timeseries.csv",
+    "zone_temps": "data\\comparison\\zone_temps.csv",
+    "decisions": "data\\comparison\\decisions.jsonl"
+  }
+}

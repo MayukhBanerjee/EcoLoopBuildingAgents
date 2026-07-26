@@ -19,6 +19,8 @@ data/*
 !data/baseline_results/**
 !data/logs/
 !data/logs/**
+!data/comparison/
+!data/comparison/**
 !data/agent_results/
 !data/agent_results/.gitkeep
 
