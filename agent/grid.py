@@ -28,7 +28,7 @@ HIGH_INTENSITY_THRESHOLD = 650.0
 
 def carbon_intensity(hour: int) -> float:
     """gCO2/kWh for the simulated hour of day (0-23)."""
-    return CARBON_INTENSITY_G_PER_KWH[hour % 24]
+    return float(CARBON_INTENSITY_G_PER_KWH[hour % 24])
 
 
 def intensity_label(hour: int) -> str:
