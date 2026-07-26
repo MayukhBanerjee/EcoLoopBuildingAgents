@@ -1,4 +1,27 @@
-/* EcoLoop dashboard theme — fill in during polish pass */
+/* EcoLoop — Precision Ops Console
+   Light industrial theme from feature/dashboard (teal + navy, IBM Plex / Outfit). */
+
 :root {
-  --accent: #00a86b;
+  --canvas: #F0F3F6;
+  --surface: #FFFFFF;
+  --surface-muted: #F7F9FB;
+  --ink: #0B1220;
+  --ink-soft: #334155;
+  --muted: #64748B;
+  --line: #E2E8F0;
+  --line-strong: #CBD5E1;
+  --teal: #0F766E;
+  --teal-soft: #CCFBF1;
+  --navy: #1E3A5F;
+  --navy-soft: #E8EEF5;
+  --amber: #B45309;
+  --amber-soft: #FEF3C7;
+  --danger: #B91C1C;
+  --danger-soft: #FEE2E2;
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+html, body, [class*="css"] {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif !important;
 }
