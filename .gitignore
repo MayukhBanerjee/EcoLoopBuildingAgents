@@ -16,6 +16,25 @@ data/agent_results/*
 data/logs/*
 !data/logs/.gitkeep
 
+# EnergyPlus temporary and diagnostic files
+*.audit
+*.bnd
+*.dxf
+*.edd
+*.eio
+*.end
+*.err
+*.eso
+*.mdd
+*.mtd
+*.mtr
+*.rdd
+*.rvaudit
+*.shd
+*.htm
+*.html
+*.log
+
 # EnergyPlus models and weather files
 energyplus/models/*.idf
 energyplus/weather/*.epw
