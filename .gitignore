@@ -8,13 +8,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# EnergyPlus bulky outputs (keep .gitkeep)
-data/baseline_results/*
-!data/baseline_results/.gitkeep
-data/agent_results/*
-!data/agent_results/.gitkeep
-data/logs/*
-!data/logs/.gitkeep
+# EnergyPlus bulky outputs (ignore all data/ subdirs except baseline_results, agent_results, and logs)
+data/*
+!data/baseline_results/
+!data/baseline_results/*
+!data/agent_results/
+!data/agent_results/*
+!data/logs/
+!data/logs/*
 
 # EnergyPlus temporary and diagnostic files
 *.audit
