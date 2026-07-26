@@ -128,6 +128,16 @@ def main() -> None:
         default=None,
         help="Stop simulation after N agent timesteps (for gate smoke).",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Render the live EnergyPlus->LLM->actuator flow in the terminal.",
+    )
+    parser.add_argument(
+        "--no-stream-file",
+        action="store_true",
+        help="Skip writing stream_events.jsonl (terminal output only).",
+    )
     args = parser.parse_args()
 
     if args.chaos:
@@ -157,11 +167,22 @@ def main() -> None:
     from bridge.ep_writer import EPWriter
     from agent.llm_client import LLMClient
     from agent.orchestrator import EcoLoopOrchestrator
+    from agent.stream import ConsoleSink, JsonlSink, StreamBus
 
     # Fresh EP state for each run
     from bridge import state_manager
 
     state_manager.reset_state()
+
+    # Observability bus: always records to disk, renders to terminal on --stream.
+    stream = StreamBus()
+    if not args.no_stream_file:
+        stream.add(JsonlSink(out_dir / "stream_events.jsonl"))
+    if args.stream:
+        # EnergyPlus writes progress to stdout; keep the flow readable.
+        logging.getLogger("EcoLoop.agent.orchestrator").setLevel(logging.WARNING)
+        stream.add(ConsoleSink())
+        logger.info("Live stream enabled — rendering EnergyPlus -> LLM flow.")
 
     runner = EPRunner(IDF, EPW, out_dir / "eplus")
     reader = EPReader(runner.api, runner.state, dump_dir=out_dir)
@@ -177,6 +198,7 @@ def main() -> None:
         agent_every_n_steps=args.steps,
         output_dir=out_dir,
         source_idf=IDF,
+        stream=stream,
     )
 
     if stop_after:
@@ -205,6 +227,7 @@ def main() -> None:
     t0 = time.monotonic()
     exit_code = runner.run()
     elapsed = time.monotonic() - t0
+    stream.close()
     logger.info(
         "Finished in %.1fs | exit=%d | callbacks=%d | errors=%d",
         elapsed,

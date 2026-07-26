@@ -27,6 +27,7 @@ from agent.prompts import (
     build_action_nudge_prompt,
     build_timestep_prompt,
 )
+from agent.stream import ACT, CLAMP, PROMPT, SENSE, TOOL, StreamBus
 from agent.tools import ToolExecutor
 from bridge.constants import CONTROLLED_ZONES
 from bridge.fallback import safe_action
@@ -53,12 +54,14 @@ class EcoLoopOrchestrator:
         agent_every_n_steps: int | None = None,
         output_dir: str | Path | None = None,
         source_idf: str | Path | None = None,
+        stream: StreamBus | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
         self.llm = llm
         self.baseline_kwh = baseline_kwh
         self.memory = AgentMemory(window=3)
+        self.stream = stream or StreamBus()
         self.timestep = 0
         self.decision_log: list[dict[str, Any]] = []
         self.actuator_timeline: list[dict[str, Any]] = []
@@ -100,6 +103,15 @@ class EcoLoopOrchestrator:
                 occ = reading.occupancy if reading is not None else {}
                 action = policy_action(reading) if reading is not None else safe_action()
                 events = self.writer.apply(action, occupancy=occ)
+                sim_minute_total = (self.timestep - 1) * 15
+                self._publish_apply(
+                    sim_hour=(sim_minute_total // 60) % 24,
+                    sim_minute=sim_minute_total % 60,
+                    action=action,
+                    clamp_events=events,
+                    fallback=True,
+                    held=False,
+                )
                 self._record_fallback_entry(
                     reasoning=(
                         f"[FALLBACK] Unhandled error: {exc}. "
@@ -138,6 +150,20 @@ class EcoLoopOrchestrator:
         }
 
         # 3. Cadence throttle — hold last setpoints between LLM decisions
+        sensor_compact_early = reading.to_compact()
+        self.stream.publish(
+            timestep=self.timestep,
+            stage=SENSE,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            outdoor_temp=sensor_compact_early.get("outdoor_temp"),
+            energy_kwh_cum=sensor_compact_early.get("energy_kwh_cum"),
+            demand_kw=round(step_kw, 2),
+            grid_label=grid_ctx["label"],
+            peak_status=grid_ctx["peak_status"],
+            zones=sensor_compact_early.get("zones", {}),
+        )
+
         if (self.timestep - 1) % self._every_n != 0:
             # Re-apply last action so actuators stay owned between LLM calls
             if self._has_actions(self._last_action):
@@ -160,6 +186,14 @@ class EcoLoopOrchestrator:
                 fallback_used=False,
                 held=True,
             )
+            self._publish_apply(
+                sim_hour=sim_hour,
+                sim_minute=sim_minute,
+                action=self._last_action,
+                clamp_events=events,
+                fallback=False,
+                held=True,
+            )
             return
 
         # 4. Build prompt
@@ -171,7 +205,6 @@ class EcoLoopOrchestrator:
             sim_hour=sim_hour,
             sim_minute=sim_minute,
         )
-
         # 5. Tool-calling loop (+ one action-nudge if LLM only observes)
         tool_executor = ToolExecutor(
             self.reader,
@@ -180,6 +213,20 @@ class EcoLoopOrchestrator:
             baseline_kwh=self.baseline_kwh,
         )
         tool_defs = tool_executor.get_tool_definitions()
+
+        self.stream.publish(
+            timestep=self.timestep,
+            stage=PROMPT,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            model=getattr(self.llm, "model", "?"),
+            prompt_chars=len(user_prompt) + len(SYSTEM_PROMPT),
+            est_tokens=(len(user_prompt) + len(SYSTEM_PROMPT)) // 4,
+            cadence=f"LLM every {self._every_n} step(s)",
+            tools_offered=len(tool_defs),
+            preview=self._prompt_preview(reading.to_compact()),
+        )
+
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
         recorded_tool_calls: list[dict[str, Any]] = []
         reasoning_text = ""
@@ -257,10 +304,41 @@ class EcoLoopOrchestrator:
                     f"{describe_policy_action(action, reading.occupancy)}"
                 )
 
+        if fallback_used:
+            decided_by = "adaptive policy (LLM unavailable)"
+        elif not recorded_tool_calls:
+            decided_by = "adaptive policy (no tool calls)"
+        else:
+            decided_by = f"LLM {getattr(self.llm, 'model', '')}".strip()
+
+        self.stream.publish(
+            timestep=self.timestep,
+            stage=TOOL,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            tool_calls=[
+                {"tool": tc.get("tool"), "args": tc.get("args")}
+                for tc in recorded_tool_calls
+            ],
+            tokens=getattr(self.llm, "total_tokens", None),
+            source=decided_by,
+            nudged=nudged,
+            fallback=fallback_used,
+            reasoning=reasoning_text,
+        )
+
         # 6. Apply
         clamp_events = self.writer.apply(action, occupancy=reading.occupancy)
         self._last_action = action
         self._append_timeline(action, sim_hour, sim_minute, fallback=fallback_used)
+        self._publish_apply(
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            action=action,
+            clamp_events=clamp_events,
+            fallback=fallback_used,
+            held=False,
+        )
 
         # 7–8. Log + memory
         self._record_entry(
@@ -364,6 +442,57 @@ class EcoLoopOrchestrator:
             action.cooling_setpoints
             or action.heating_setpoints
             or action.lighting_levels
+        )
+
+    @staticmethod
+    def _prompt_preview(sensor_compact: dict[str, Any]) -> str:
+        """Two-line digest of what the model was shown (terminal/UI display only)."""
+        zones = sensor_compact.get("zones") or {}
+        empty = [z for z, zd in zones.items() if int(zd.get("occ", 0) or 0) <= 0]
+        occupied = [z for z, zd in zones.items() if int(zd.get("occ", 0) or 0) > 0]
+        lines = [
+            f"sensor snapshot: {len(zones)} zones, "
+            f"{len(occupied)} occupied, {len(empty)} empty"
+        ]
+        if empty:
+            lines.append(f"setback candidates: {', '.join(empty)}")
+        return "\n".join(lines)
+
+    def _publish_apply(
+        self,
+        *,
+        sim_hour: int,
+        sim_minute: int,
+        action: ControlAction,
+        clamp_events: list[Any],
+        fallback: bool,
+        held: bool,
+    ) -> None:
+        """Emit the CLAMP + ACT stages for one timestep."""
+        self.stream.publish(
+            timestep=self.timestep,
+            stage=CLAMP,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            clamp_events=[
+                {
+                    "zone": e.zone,
+                    "field": e.field,
+                    "rule": e.rule,
+                    "req": round(e.requested, 2),
+                    "applied": round(e.applied, 2),
+                }
+                for e in clamp_events
+            ],
+        )
+        self.stream.publish(
+            timestep=self.timestep,
+            stage=ACT,
+            sim_hour=sim_hour,
+            sim_minute=sim_minute,
+            actions=self._actions_summary(action),
+            fallback=fallback,
+            held=held,
         )
 
     def _actions_summary(self, action: ControlAction) -> list[dict[str, Any]]:

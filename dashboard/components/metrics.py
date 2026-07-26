@@ -19,6 +19,8 @@ def render_kpi_row(
     kpis: dict[str, Any] | None = None,
 ) -> None:
     """Render the 5-card KPI strip with first-time-viewer friendly copy."""
+    baseline_comfort = None
+    comfort_delta = None
     if kpis is not None:
         savings_pct = kpis.get("savings_pct")
         comfort_pct = kpis.get("comfort_compliance_pct")
@@ -27,15 +29,30 @@ def render_kpi_row(
         clamps_count = int(kpis.get("total_clamp_events") or 0)
         steps_completed = int(kpis.get("timesteps_agent") or kpis.get("decisions_count") or 0)
         total_steps = int(kpis.get("timesteps_baseline") or 96)
+        baseline_comfort = kpis.get("baseline_comfort_compliance_pct")
+        comfort_delta = kpis.get("comfort_delta_pct")
 
     savings_pct = 0.0 if savings_pct is None else float(savings_pct)
-    comfort_pct = 0.0 if comfort_pct is None else float(comfort_pct)
     agent_kwh = 0.0 if agent_kwh is None else float(agent_kwh)
     baseline_kwh = 0.0 if baseline_kwh is None else float(baseline_kwh)
     saved_kwh = max(0.0, baseline_kwh - agent_kwh)
 
     progress = min(100.0, (steps_completed / total_steps) * 100.0) if total_steps else 0.0
     hours = total_steps * 0.25  # 15-min steps
+
+    if comfort_pct is None:
+        comfort_value = "n/a"
+        comfort_hint = "No occupied steps — comfort not measured"
+    else:
+        comfort_value = f"{float(comfort_pct):.1f}%"
+        if baseline_comfort is not None and comfort_delta is not None:
+            sign = "+" if float(comfort_delta) >= 0 else ""
+            comfort_hint = (
+                f"vs baseline {float(baseline_comfort):.1f}% "
+                f"({sign}{float(comfort_delta):.1f} pts)"
+            )
+        else:
+            comfort_hint = "Occupied time inside the comfort band"
 
     st.markdown(
         f"""
@@ -47,8 +64,8 @@ def render_kpi_row(
           </div>
           <div class="kpi-card">
             <div class="kpi-label">People comfortable</div>
-            <div class="kpi-value">{comfort_pct:.1f}%</div>
-            <div class="kpi-hint">Occupied time inside the comfort band</div>
+            <div class="kpi-value">{comfort_value}</div>
+            <div class="kpi-hint">{comfort_hint}</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Power used today</div>

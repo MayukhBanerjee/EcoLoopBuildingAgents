@@ -73,14 +73,21 @@ def audit(log_path: Path) -> dict:
                 }
             )
 
-    pct = (comfortable / occupied * 100.0) if occupied else 100.0
+    pct = (comfortable / occupied * 100.0) if occupied else None
     return {
         "log": str(log_path),
         "occupied_zone_steps": occupied,
         "comfortable_zone_steps": comfortable,
-        "comfort_compliance_pct": round(pct, 1),
+        # None (not 100.0) when nothing was occupied — a compliance rate over an
+        # empty sample is undefined, and reporting 100% there overstates the result.
+        "comfort_compliance_pct": round(pct, 1) if pct is not None else None,
         "target_pct": 90.0,
-        "pass": pct >= 90.0 if occupied else True,
+        "pass": (pct >= 90.0) if pct is not None else False,
+        "verdict": (
+            "no occupied zone-steps — comfort not exercised, nothing to certify"
+            if occupied == 0
+            else ("meets the 90% target" if pct >= 90.0 else "below the 90% target")
+        ),
     }
 
 
@@ -100,11 +107,19 @@ def main() -> None:
     out.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"Wrote {out}")
 
-    tag = "PASS" if result["pass"] else "MEASURED (below 90% target)"
-    print(
-        f"[{tag}] comfort={result['comfort_compliance_pct']}% "
-        f"({result['comfortable_zone_steps']}/{result['occupied_zone_steps']} occupied zone-steps)"
-    )
+    occupied = result["occupied_zone_steps"]
+    if occupied == 0:
+        print(
+            "[NOT MEASURED] No occupied zone-steps in this log — "
+            "comfort compliance is undefined, not 100%. "
+            "Re-run over occupied hours before quoting a comfort figure."
+        )
+    else:
+        tag = "PASS" if result["pass"] else "MEASURED (below 90% target)"
+        print(
+            f"[{tag}] comfort={result['comfort_compliance_pct']}% "
+            f"({result['comfortable_zone_steps']}/{occupied} occupied zone-steps)"
+        )
     # T4.6 is "measured" — do not hard-fail the process on <90%
     sys.exit(0)
 

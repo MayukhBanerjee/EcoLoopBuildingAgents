@@ -259,7 +259,12 @@ def _load_agent(run_dir: Path) -> dict[str, Any]:
 # Writers
 # ---------------------------------------------------------------------------
 
-def _comfort_pct(decisions: list[dict[str, Any]]) -> tuple[float, int, int]:
+def _comfort_pct(decisions: list[dict[str, Any]]) -> tuple[float | None, int, int]:
+    """Share of occupied zone-steps inside the ASHRAE band.
+
+    Returns None (not 100.0) when no zone was ever occupied — a compliance rate
+    over an empty sample is undefined, and reporting 100% there overstates it.
+    """
     occupied = 0
     comfortable = 0
     for d in decisions:
@@ -272,7 +277,30 @@ def _comfort_pct(decisions: list[dict[str, Any]]) -> tuple[float, int, int]:
             if comfort_ok(pmv(float(zd.get("temp", 22.0)))):
                 comfortable += 1
     if occupied == 0:
-        return 100.0, 0, 0
+        return None, 0, 0
+    return round(comfortable / occupied * 100.0, 1), comfortable, occupied
+
+
+def _comfort_from_series(
+    temps: dict[str, list[float]], occ: dict[str, list[float]]
+) -> tuple[float | None, int, int]:
+    """Comfort compliance over occupied zone-steps of a raw temperature series.
+
+    Lets the baseline be scored the same way as the agent, so "comfort
+    maintained" is a comparison rather than an unanchored number.
+    """
+    occupied = 0
+    comfortable = 0
+    for zone, series in temps.items():
+        occ_series = occ.get(zone) or []
+        for i, temp in enumerate(series):
+            if i >= len(occ_series) or float(occ_series[i] or 0) <= 0:
+                continue
+            occupied += 1
+            if comfort_ok(pmv(float(temp))):
+                comfortable += 1
+    if occupied == 0:
+        return None, 0, 0
     return round(comfortable / occupied * 100.0, 1), comfortable, occupied
 
 
@@ -408,6 +436,10 @@ def write_comparison(baseline: dict[str, Any], agent: dict[str, Any] | None) -> 
         status = "empty"
 
     comfort_pct, comfort_ok_n, comfort_occ_n = _comfort_pct(decisions)
+    # Score the baseline the same way so comfort is a comparison, not a bare number.
+    base_comfort_pct, base_comfort_ok, base_comfort_occ = _comfort_from_series(
+        baseline["temps"], baseline["occ"]
+    )
     summary = (agent or {}).get("summary") or {}
     fallback_count = int(
         summary.get(
@@ -429,6 +461,14 @@ def write_comparison(baseline: dict[str, Any], agent: dict[str, Any] | None) -> 
         "comfort_compliance_pct": comfort_pct,
         "comfort_occupied_steps": comfort_occ_n,
         "comfort_ok_steps": comfort_ok_n,
+        "baseline_comfort_compliance_pct": base_comfort_pct,
+        "baseline_comfort_occupied_steps": base_comfort_occ,
+        "baseline_comfort_ok_steps": base_comfort_ok,
+        "comfort_delta_pct": (
+            round(comfort_pct - base_comfort_pct, 1)
+            if comfort_pct is not None and base_comfort_pct is not None
+            else None
+        ),
         "fallback_count": fallback_count,
         "decisions_count": len(decisions),
         "llm_calls": summary.get("llm_calls"),

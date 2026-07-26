@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from dashboard.components.about import show_about_dialog
 from dashboard.components.agent_log import render_agent_log, render_audit_trail
 from dashboard.components.metrics import render_kpi_row
+from dashboard.components.stream import render_data_stream
 from dashboard.components.timeline import (
     render_energy_chart,
     render_occupancy_chart,
@@ -645,7 +646,9 @@ if not _has_comparison:
 
 saved_kwh = float(kpis.get("baseline_kwh") or 0) - float(kpis.get("agent_kwh") or 0)
 savings_pct = float(kpis.get("savings_pct") or 0)
-comfort_pct = float(kpis.get("comfort_compliance_pct") or 0)
+comfort_pct = kpis.get("comfort_compliance_pct")
+baseline_comfort = kpis.get("baseline_comfort_compliance_pct")
+comfort_delta = kpis.get("comfort_delta_pct")
 
 # --- Header ---
 h1, h2 = st.columns([4.0, 1.35], vertical_alignment="bottom")
@@ -684,6 +687,24 @@ with h2:
             st.rerun()
 
 # --- One-paragraph story for first-time viewers ---
+if comfort_pct is None:
+    comfort_line = (
+        "Comfort was **not measured** this run (no occupied zone-steps) — "
+        "we never report a fake 100%."
+    )
+elif baseline_comfort is not None and comfort_delta is not None:
+    sign = "+" if float(comfort_delta) >= 0 else ""
+    comfort_line = (
+        f"People were in the comfort band **{float(comfort_pct):.1f}%** of occupied time "
+        f"(baseline was **{float(baseline_comfort):.1f}%**, "
+        f"{sign}{float(comfort_delta):.1f} pts) — charts below show *when* and *why*."
+    )
+else:
+    comfort_line = (
+        f"People were in the comfort band **{float(comfort_pct):.1f}%** of occupied time — "
+        "the charts below show *when* and *why*."
+    )
+
 with st.container(border=True):
     st.markdown(
         f"""
@@ -692,7 +713,7 @@ and gently turns cooling / heating / lights down when rooms are empty — always
 Click **About** (top right) for the full problem, solution, and how every number is calculated.
 
 **Today's impact.** It used **{savings_pct:.1f}% less electricity** ({saved_kwh:.0f} kWh saved vs the normal schedule).
-People were in the comfort band **{comfort_pct:.1f}%** of occupied time — the charts below show *when* and *why*.
+{comfort_line}
         """
     )
 
@@ -745,6 +766,9 @@ with right:
 # Separate module — sits under the occupancy chart / chart stack
 with st.container(height=420, border=True):
     render_audit_trail(logs, limit=8)
+
+with st.container(border=True):
+    render_data_stream(logs)
 
 st.markdown(
     """

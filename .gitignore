@@ -21,10 +21,6 @@ data/*
 !data/logs/
 !data/logs/**
 !data/comparison/
-!data/comparison/***
-!data/logs/
-!data/logs/**
-!data/comparison/
 !data/comparison/**
 !data/agent_results/
 !data/agent_results/.gitkeep
@@ -37,10 +33,9 @@ data/agent_results/**
 data/bridge_*/
 data/runtime_oracle/
 
-# EnergyPlus temporary and diagnostic files (anywhere in the repo) (anywhere in the repo)
+# EnergyPlus temporary and diagnostic files (anywhere in the repo)
 *.audit
 *.bnd
-*.dbg
 *.dbg
 *.dxf
 *.edd
@@ -62,13 +57,8 @@ eplusmtr.*
 eplusssz.*
 epluszsz.*
 sqlite.err
-eplusout.*
-eplusmtr.*
-eplusssz.*
-epluszsz.*
-sqlite.err
 
-# EnergyPlus models and weather files (local install / large binaries) (local install / large binaries)
+# EnergyPlus models and weather files (local install / large binaries)
 energyplus/models/*.idf
 energyplus/weather/*.epw
 *.idf

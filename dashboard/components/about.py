@@ -37,7 +37,7 @@ We always compare against a **baseline day** with the same weather and building,
 | Section | What it means |
 |---|---|
 | **Electricity cut** | % less kWh than the normal schedule for the same day |
-| **People comfortable** | Share of *occupied* zone-steps where comfort (PMV) stayed in band |
+| **People comfortable** | Share of *occupied* zone-steps where comfort (PMV) stayed in band — always compared to the no-AI baseline when available |
 | **Power used today** | Absolute kWh with EcoLoop vs without |
 | **Safety catches** | How many times hard limits blocked or corrected a request |
 | **Electricity chart** | Cumulative kWh over the day — shaded gap = energy saved |
