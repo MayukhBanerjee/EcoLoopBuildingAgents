@@ -13,17 +13,7 @@ data/*
 !data/baseline_results/
 !data/baseline_results/*
 !data/agent_results/
-!data/runtime_oracle/*
-!data/runtime_oracle/.gitkeep
-data/bridge_smoke/*
-!data/bridge_smoke/.gitkeep
-data/bridge_read/*
-!data/bridge_read/.gitkeep
-data/bridge_write/*
-!data/bridge_write/.gitkeep
-data/bridge_meter_diag/*
-data/bridge_meter_diag2/*
-data/agent_results/*
+!data/agent_results/*
 !data/logs/
 !data/logs/*
 
